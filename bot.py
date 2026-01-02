@@ -1,7 +1,7 @@
 import os
 import time
-import threading
 import sqlite3
+import threading
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -28,7 +28,7 @@ app = Flask(__name__)
 
 @app.get("/")
 def home():
-    return "OK", 200
+    return "✅ Bot is running!", 200
 
 PORT = int(os.getenv("PORT", 10000))
 
@@ -50,6 +50,17 @@ def init_db():
         )
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            shift_id INTEGER,
+            delay_minutes INTEGER,
+            timestamp TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -68,69 +79,137 @@ def seed_shifts():
         conn.commit()
     conn.close()
 
+def get_shifts():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT shift_id, shift_name, start_time FROM shifts ORDER BY shift_id")
+    data = c.fetchall()
+    conn.close()
+    return data
+
 # --------------------------
-# Users (temporary)
+# Users
 # --------------------------
-MANAGERS = {6017492841}
-EMPLOYEES = {6017492841}
+MANAGERS = {6017492841, 97965212, 1035761242}
 
 # --------------------------
 # Conversation states
 # --------------------------
-ROLE_SELECT, MENU = range(2)
+SHIFT_SELECT, DELAY_INPUT = range(2)
 
 # --------------------------
 # Keyboards
 # --------------------------
-def kb_role():
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("👑 مدیر"), KeyboardButton("👤 کارمند")]],
-        resize_keyboard=True
-    )
+def kb_shifts():
+    shifts = get_shifts()
+    keyboard = []
+    row = []
+    for sid, sname, start_time in shifts:
+        row.append(KeyboardButton(str(sid)))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
 
-def kb_manager_menu():
-    return ReplyKeyboardMarkup([["⬅️ بازگشت"]], resize_keyboard=True)
+    keyboard.append([KeyboardButton("⬅️ بازگشت"), KeyboardButton("/cancel")])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def kb_employee_menu():
-    return ReplyKeyboardMarkup([["⬅️ بازگشت"]], resize_keyboard=True)
+def kb_back():
+    return ReplyKeyboardMarkup([[KeyboardButton("⬅️ بازگشت"), KeyboardButton("/cancel")]], resize_keyboard=True)
 
 # --------------------------
 # Bot handlers
 # --------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "سلام! خوش آمدید 🌟\nنقش خود را انتخاب کنید:",
-        reply_markup=kb_role()
-    )
-    return ROLE_SELECT
-
-async def role_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
     user_id = update.effective_user.id
+    if user_id not in MANAGERS:
+        await update.message.reply_text("❌ فعلاً فقط مدیران اجازه ورود دارند.")
+        return ConversationHandler.END
 
-    if text == "👑 مدیر":
-        if user_id not in MANAGERS:
-            await update.message.reply_text("شما مدیر نیستید ❌", reply_markup=kb_role())
-            return ROLE_SELECT
-        await update.message.reply_text("منوی مدیر 👇", reply_markup=kb_manager_menu())
-        return MENU
+    await update.message.reply_text(
+        "✅ خوش آمدید مدیر 🌟\n\n"
+        "برای ثبت ورود، شماره شیفت را انتخاب کنید:\n"
+        "1️⃣ شیفت 1 (08:00-16:00)\n"
+        "2️⃣ شیفت 2 (16:00-24:00)\n"
+        "3️⃣ شیفت 3 (00:00-08:00)\n\n"
+        "👇 فقط عدد 1 یا 2 یا 3 را ارسال کنید.",
+        reply_markup=kb_shifts()
+    )
+    return SHIFT_SELECT
 
-    if text == "👤 کارمند":
-        if user_id not in EMPLOYEES:
-            await update.message.reply_text("شما در لیست پرسنل نیستید ❌", reply_markup=kb_role())
-            return ROLE_SELECT
-        await update.message.reply_text("منوی کارمند 👇", reply_markup=kb_employee_menu())
-        return MENU
+async def shift_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
 
-    await update.message.reply_text("لطفاً یکی از گزینه‌ها را انتخاب کنید.", reply_markup=kb_role())
-    return ROLE_SELECT
+    if text == "⬅️ بازگشت":
+        return await start(update, context)
 
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("فعلاً فقط تست آنلاین شدن ربات ✅")
-    return MENU
+    if text not in ["1", "2", "3"]:
+        await update.message.reply_text("❌ مقدار شیفت نامعتبر است. فقط 1 یا 2 یا 3 بفرست.", reply_markup=kb_shifts())
+        return SHIFT_SELECT
+
+    context.user_data["shift_id"] = int(text)
+    await update.message.reply_text(
+        "✅ خیلی خوب!\n\n"
+        "⏱️ حالا میزان تاخیر را به دقیقه وارد کن (مثلاً 10):",
+        reply_markup=kb_back()
+    )
+    return DELAY_INPUT
+
+async def delay_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if text == "⬅️ بازگشت":
+        await update.message.reply_text("⬅️ برگشتیم به انتخاب شیفت.", reply_markup=kb_shifts())
+        return SHIFT_SELECT
+
+    if text == "/cancel":
+        await update.message.reply_text("✅ عملیات کنسل شد.", reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True))
+        return ConversationHandler.END
+
+    if not text.isdigit():
+        await update.message.reply_text("❌ لطفاً فقط عدد دقیقه وارد کن (مثلاً 5 یا 10).", reply_markup=kb_back())
+        return DELAY_INPUT
+
+    delay = int(text)
+    shift_id = context.user_data.get("shift_id")
+    user = update.effective_user
+    username = user.full_name
+
+    # ذخیره در دیتابیس
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO attendance (user_id, username, shift_id, delay_minutes, timestamp) VALUES (?, ?, ?, ?, ?)",
+              (user.id, username, shift_id, delay, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+    # پیام برای خود کاربر
+    await update.message.reply_text(
+        f"✅ ورود ثبت شد!\n\n"
+        f"👤 {username}\n"
+        f"🕒 شیفت: {shift_id}\n"
+        f"⏱️ تاخیر: {delay} دقیقه",
+        reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True)
+    )
+
+    # پیام برای همه مدیرها
+    msg = f"📢 گزارش ورود:\n\n👤 {username}\n🕒 شیفت {shift_id}\n⏱️ {delay} دقیقه تاخیر"
+
+    for manager_id in MANAGERS:
+        try:
+            await context.bot.send_message(chat_id=manager_id, text=msg)
+        except:
+            pass
+
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ عملیات کنسل شد.", reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True))
+    return ConversationHandler.END
 
 # --------------------------
-# Run bot in background thread
+# Run bot (SAFE for Render)
 # --------------------------
 def run_bot():
     init_db()
@@ -141,21 +220,24 @@ def run_bot():
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ROLE_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, role_select)],
-            MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, menu)],
+            SHIFT_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, shift_select)],
+            DELAY_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, delay_input)],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
     application.add_handler(conv)
 
+    # ✅ Safe start (no run_polling in thread)
+    application.initialize()
+    application.start()
+    application.updater.start_polling()
+
+    print("✅ Telegram bot polling started!")
+
+    # keep thread alive
     while True:
-        try:
-            print("✅ Bot is running...")
-            application.run_polling()
-        except Exception as e:
-            print("⚠️ Bot crashed, retry in 5s:", e)
-            time.sleep(5)
+        time.sleep(10)
 
 # --------------------------
 # Main
