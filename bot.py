@@ -2,6 +2,7 @@ import os
 import time
 import sqlite3
 import threading
+import asyncio
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -160,90 +161,4 @@ async def delay_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if text == "⬅️ بازگشت":
-        await update.message.reply_text("⬅️ برگشتیم به انتخاب شیفت.", reply_markup=kb_shifts())
-        return SHIFT_SELECT
-
-    if text == "/cancel":
-        await update.message.reply_text("✅ عملیات کنسل شد.", reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True))
-        return ConversationHandler.END
-
-    if not text.isdigit():
-        await update.message.reply_text("❌ لطفاً فقط عدد دقیقه وارد کن (مثلاً 5 یا 10).", reply_markup=kb_back())
-        return DELAY_INPUT
-
-    delay = int(text)
-    shift_id = context.user_data.get("shift_id")
-    user = update.effective_user
-    username = user.full_name
-
-    # ذخیره در دیتابیس
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO attendance (user_id, username, shift_id, delay_minutes, timestamp) VALUES (?, ?, ?, ?, ?)",
-              (user.id, username, shift_id, delay, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-    # پیام برای خود کاربر
-    await update.message.reply_text(
-        f"✅ ورود ثبت شد!\n\n"
-        f"👤 {username}\n"
-        f"🕒 شیفت: {shift_id}\n"
-        f"⏱️ تاخیر: {delay} دقیقه",
-        reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True)
-    )
-
-    # پیام برای همه مدیرها
-    msg = f"📢 گزارش ورود:\n\n👤 {username}\n🕒 شیفت {shift_id}\n⏱️ {delay} دقیقه تاخیر"
-
-    for manager_id in MANAGERS:
-        try:
-            await context.bot.send_message(chat_id=manager_id, text=msg)
-        except:
-            pass
-
-    return ConversationHandler.END
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ عملیات کنسل شد.", reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True))
-    return ConversationHandler.END
-
-# --------------------------
-# Run bot (SAFE for Render)
-# --------------------------
-def run_bot():
-    init_db()
-    seed_shifts()
-
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            SHIFT_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, shift_select)],
-            DELAY_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, delay_input)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    application.add_handler(conv)
-
-    # ✅ Safe start (no run_polling in thread)
-    application.initialize()
-    application.start()
-    application.updater.start_polling()
-
-    print("✅ Telegram bot polling started!")
-
-    # keep thread alive
-    while True:
-        time.sleep(10)
-
-# --------------------------
-# Main
-# --------------------------
-if __name__ == "__main__":
-    threading.Thread(target=run_bot, daemon=True).start()
-
-    print(f"✅ Flask running on PORT={PORT}")
-    app.run(host="0.0.0.0", port=PORT)
+        await update.message.reply_text("⬅️_
