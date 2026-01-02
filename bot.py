@@ -23,7 +23,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is missing! Set it in Render Environment Variables.")
+    raise ValueError("❌ BOT_TOKEN is missing! Set it in Render Environment Variables.")
 
 # --------------------------
 # Flask app (Render needs a web port)
@@ -32,7 +32,7 @@ app = Flask(__name__)
 
 @app.get("/")
 def home():
-    return "OK - Bot is running", 200
+    return "✅ Bot is running!", 200
 
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -208,55 +208,3 @@ async def delay_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ ورود ثبت شد!\n\n"
         f"👤 {username}\n"
-        f"🕒 شیفت: {shift_id}\n"
-        f"⏱️ تاخیر: {delay} دقیقه",
-        reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True),
-    )
-
-    msg = f"📢 گزارش ورود:\n\n👤 {username}\n🕒 شیفت {shift_id}\n⏱️ {delay} دقیقه تاخیر"
-    for manager_id in MANAGERS:
-        try:
-            await context.bot.send_message(chat_id=manager_id, text=msg)
-        except:
-            pass
-
-    return ConversationHandler.END
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ عملیات کنسل شد.",
-        reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True),
-    )
-    return ConversationHandler.END
-
-# --------------------------
-# Bot runner (no Updater)
-# --------------------------
-def run_bot():
-    init_db()
-    seed_shifts()
-
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            SHIFT_SELECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, shift_select)],
-            DELAY_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, delay_input)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    application.add_handler(conv)
-
-    print("✅ Telegram bot polling started!")
-    application.run_polling()
-
-# --------------------------
-# Main
-# --------------------------
-if __name__ == "__main__":
-    threading.Thread(target=run_bot, daemon=True).start()
-
-    print(f"✅ Flask running on PORT={PORT}")
-    app.run(host="0.0.0.0", port=PORT)
