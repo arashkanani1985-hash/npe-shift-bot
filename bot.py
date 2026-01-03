@@ -2,10 +2,11 @@ import os
 import sqlite3
 import asyncio
 import threading
+import requests
 from datetime import datetime, timedelta, time as dtime
 
 from dotenv import load_dotenv
-from flask import Flask
+from flask import Flask, request
 
 from telegram import (
     Update,
@@ -36,6 +37,10 @@ if not BOT_TOKEN:
 PORT = int(os.getenv("PORT", 10000))
 DB_NAME = "attendance.db"
 
+RENDER_URL = os.getenv("RENDER_URL", "https://npe-shift-bot-docker.onrender.com").rstrip("/")
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
+
 # ---------------------------
 # Roles
 # ---------------------------
@@ -61,16 +66,32 @@ LATE_ALERT_MINUTES_AFTER_SHIFT_START = 5
 NIGHTLY_REPORT_HOUR = 23
 NIGHTLY_REPORT_MINUTE = 59
 
-
 # =============================================================================
-# Flask app (Render keep-alive)
+# Flask app (Webhook + healthcheck)
 # =============================================================================
 app = Flask(__name__)
+application = None  # will be created in bot thread
 
 @app.get("/")
 def home():
-    return "✅ Bot is running (keep-alive OK)", 200
+    return "✅ Bot is running (Webhook mode OK)", 200
 
+@app.post(WEBHOOK_PATH)
+def webhook():
+    global application
+    if application is None:
+        return "bot not ready", 503
+
+    data = request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
+
+    # Put update into PTB queue (thread-safe)
+    try:
+        application.update_queue.put_nowait(update)
+    except Exception:
+        application.update_queue.put(update)
+
+    return "ok", 200
 
 # =============================================================================
 # Database
@@ -952,7 +973,6 @@ async def job_shift_reminder(context: ContextTypes.DEFAULT_TYPE):
         remind_dt = start_dt - timedelta(minutes=REMINDER_MINUTES_BEFORE_SHIFT)
 
         if abs((now - remind_dt).total_seconds()) < 60:
-            # Find employees in this shift
             conn = db()
             c = conn.cursor()
             c.execute("SELECT user_id FROM employee_shifts WHERE shift_id=?", (shift_id,))
@@ -987,11 +1007,9 @@ async def job_late_alert(context: ContextTypes.DEFAULT_TYPE):
             conn = db()
             c = conn.cursor()
 
-            # assigned users to this shift
             c.execute("SELECT user_id FROM employee_shifts WHERE shift_id=?", (shift_id,))
             assigned = [r[0] for r in c.fetchall()]
 
-            # checked in today
             c.execute("SELECT user_id FROM attendance WHERE date=? AND shift_id=? AND check_in_time IS NOT NULL", (date_str, shift_id))
             checked = {r[0] for r in c.fetchall()}
             conn.close()
@@ -1126,6 +1144,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Bot main
 # =============================================================================
 async def bot_main():
+    global application
     init_db()
 
     application = Application.builder().token(BOT_TOKEN).build()
@@ -1172,7 +1191,6 @@ async def bot_main():
         fallbacks=[],
     ))
 
-    # Router
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_buttons))
 
     # Jobs
@@ -1180,11 +1198,11 @@ async def bot_main():
     application.job_queue.run_repeating(job_late_alert, interval=60, first=20)
     application.job_queue.run_repeating(job_nightly_report, interval=60, first=30)
 
+    # Initialize but DO NOT start polling
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()
 
-    print("✅ Telegram bot polling started!")
+    print("✅ Telegram bot started in webhook mode (no polling)!")
     await asyncio.Event().wait()
 
 
@@ -1194,7 +1212,25 @@ def run_bot_thread():
     loop.run_until_complete(bot_main())
 
 
+def set_webhook():
+    try:
+        # delete old webhook + pending updates
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=10)
+        # set new webhook
+        r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}", timeout=10)
+        print("✅ setWebhook response:", r.text)
+    except Exception as e:
+        print("❌ webhook setup failed:", e)
+
+
 if __name__ == "__main__":
+    # Start bot in background thread
     threading.Thread(target=run_bot_thread, daemon=True).start()
+
+    # Set webhook
+    print(f"✅ Setting webhook to: {WEBHOOK_URL}")
+    set_webhook()
+
+    # Start Flask
     print(f"✅ Flask running on PORT={PORT}")
     app.run(host="0.0.0.0", port=PORT)
