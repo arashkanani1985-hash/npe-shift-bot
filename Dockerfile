@@ -9,4 +9,4 @@ COPY . .
 
 EXPOSE 10000
 
-CMD ["python", "bot.py"]
+CMD ["python", "server.py"]
