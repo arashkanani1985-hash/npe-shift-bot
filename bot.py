@@ -1,7 +1,7 @@
 import os
-import time
 import sqlite3
 import threading
+import asyncio
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -22,7 +22,6 @@ from telegram.ext import (
 # --------------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN is missing! Set it in Render Environment Variables.")
 
@@ -33,7 +32,7 @@ app = Flask(__name__)
 
 @app.get("/")
 def home():
-    return "✅ Bot is running!", 200
+    return "✅ Bot + Web are running!", 200
 
 PORT = int(os.getenv("PORT", 10000))
 
@@ -109,13 +108,11 @@ def kb_shifts():
     shifts = get_shifts()
     keyboard = []
     row = []
-
-    for sid, sname, start_time in shifts:
+    for sid, _, _ in shifts:
         row.append(KeyboardButton(str(sid)))
         if len(row) == 3:
             keyboard.append(row)
             row = []
-
     if row:
         keyboard.append(row)
 
@@ -133,7 +130,6 @@ def kb_back():
 # --------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if user_id not in MANAGERS:
         await update.message.reply_text("❌ فعلاً فقط مدیران اجازه ورود دارند.")
         return ConversationHandler.END
@@ -163,10 +159,8 @@ async def shift_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SHIFT_SELECT
 
     context.user_data["shift_id"] = int(text)
-
     await update.message.reply_text(
-        "✅ خیلی خوب!\n\n"
-        "⏱️ حالا میزان تاخیر را به دقیقه وارد کن (مثلاً 10):",
+        "✅ خیلی خوب!\n\n⏱️ حالا میزان تاخیر را به دقیقه وارد کن (مثلاً 10):",
         reply_markup=kb_back()
     )
     return DELAY_INPUT
@@ -237,9 +231,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # --------------------------
-# Run bot
+# Bot (runs in its own thread + its own event loop)
 # --------------------------
-def run_bot():
+async def bot_main():
     init_db()
     seed_shifts()
 
@@ -253,17 +247,27 @@ def run_bot():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
-
     application.add_handler(conv)
 
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
     print("✅ Telegram bot polling started!")
-    application.run_polling()
+
+    # keep alive forever
+    await asyncio.Event().wait()
+
+def run_bot_thread():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(bot_main())
 
 # --------------------------
 # Main
 # --------------------------
 if __name__ == "__main__":
-    threading.Thread(target=run_bot, daemon=True).start()
+    threading.Thread(target=run_bot_thread, daemon=True).start()
 
     print(f"✅ Flask running on PORT={PORT}")
     app.run(host="0.0.0.0", port=PORT)
