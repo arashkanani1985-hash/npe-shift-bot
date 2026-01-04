@@ -67,6 +67,14 @@ NIGHTLY_REPORT_HOUR = 23
 NIGHTLY_REPORT_MINUTE = 59
 
 # =============================================================================
+# TIME LIMITS (FINAL)
+# =============================================================================
+CHECKIN_EARLY_MINUTES = 5
+CHECKIN_LATE_MINUTES = 60
+CHECKOUT_EARLY_MINUTES = 5
+CHECKOUT_LATE_MINUTES = 60
+
+# =============================================================================
 # FLASK (Render keep-alive)
 # =============================================================================
 app = Flask(__name__)
@@ -249,6 +257,23 @@ def get_employee_shift(user_id: int):
     conn.close()
     return row[0] if row else None
 
+def shift_window_for_today(shift_id: int):
+    now = datetime.now()
+    shift = get_shift_by_id(shift_id)
+    if not shift:
+        return None, None
+
+    start_hhmm = shift[2]
+    end_hhmm = shift[3]
+
+    start_dt = datetime.combine(now.date(), parse_hhmm(start_hhmm))
+    if end_hhmm == "24:00":
+        end_dt = datetime.combine(now.date() + timedelta(days=1), dtime(0, 0))
+    else:
+        end_dt = datetime.combine(now.date(), parse_hhmm(end_hhmm))
+
+    return start_dt, end_dt
+
 # =============================================================================
 # KEYBOARDS
 # =============================================================================
@@ -343,7 +368,7 @@ LATE_ALERT_TEXT = (
 # HELPERS
 # =============================================================================
 async def notify_real_managers(context: ContextTypes.DEFAULT_TYPE, text: str):
-    for mid in REAL_MANAGERS | SUPERUSER:  # superuser also receives
+    for mid in REAL_MANAGERS | SUPERUSER:
         try:
             await context.bot.send_message(chat_id=mid, text=text)
         except:
@@ -517,14 +542,36 @@ async def employee_check_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ شیفت شما هنوز تنظیم نشده. با مدیر تماس بگیرید.", reply_markup=kb_employee(uid))
         return
 
+    shift_start_dt, shift_end_dt = shift_window_for_today(shift_id)
+    now = datetime.now()
+
+    allowed_start = shift_start_dt - timedelta(minutes=CHECKIN_EARLY_MINUTES)
+    allowed_end = shift_start_dt + timedelta(minutes=CHECKIN_LATE_MINUTES)
+
+    if now < allowed_start:
+        await update.message.reply_text(
+            f"⛔ هنوز زمان ورود شما نرسیده.\n\n"
+            f"✅ ورود فقط از *{CHECKIN_EARLY_MINUTES} دقیقه قبل شروع شیفت* مجاز است.",
+            reply_markup=kb_employee(uid),
+            parse_mode="Markdown"
+        )
+        return
+
+    if now > allowed_end:
+        await update.message.reply_text(
+            f"⛔ زمان ورود شما گذشته.\n\n"
+            f"✅ ورود فقط تا *{CHECKIN_LATE_MINUTES} دقیقه بعد از شروع شیفت* مجاز است.",
+            reply_markup=kb_employee(uid),
+            parse_mode="Markdown"
+        )
+        return
+
     existing = get_today_attendance(uid, date_str)
     if existing and existing[2]:
         await update.message.reply_text("✅ ورود شما قبلاً ثبت شده است.", reply_markup=kb_employee(uid))
         return
 
     shift = get_shift_by_id(shift_id)
-    now = datetime.now()
-    shift_start_dt = datetime.combine(now.date(), parse_hhmm(shift[2]))
     delay = max(0, int((now - shift_start_dt).total_seconds() // 60))
 
     full_name = get_employee_full_name(uid) or user.full_name
@@ -563,7 +610,34 @@ async def employee_check_out(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("✅ خروج شما قبلاً ثبت شده است.", reply_markup=kb_employee(uid))
         return
 
+    shift_id = get_employee_shift(uid)
+    if not shift_id:
+        await update.message.reply_text("❌ شیفت شما مشخص نیست. با مدیر تماس بگیرید.", reply_markup=kb_employee(uid))
+        return
+
+    shift_start_dt, shift_end_dt = shift_window_for_today(shift_id)
     now = datetime.now()
+
+    allowed_start = shift_end_dt - timedelta(minutes=CHECKOUT_EARLY_MINUTES)
+    allowed_end = shift_end_dt + timedelta(minutes=CHECKOUT_LATE_MINUTES)
+
+    if now < allowed_start:
+        await update.message.reply_text(
+            f"⛔ هنوز زمان خروج شما نرسیده.\n\n"
+            f"✅ خروج فقط از *{CHECKOUT_EARLY_MINUTES} دقیقه قبل پایان شیفت* مجاز است.",
+            reply_markup=kb_employee(uid),
+            parse_mode="Markdown"
+        )
+        return
+
+    if now > allowed_end:
+        await update.message.reply_text(
+            f"⛔ زمان خروج شما گذشته.\n\n"
+            f"✅ خروج فقط تا *{CHECKOUT_LATE_MINUTES} دقیقه بعد پایان شیفت* مجاز است.",
+            reply_markup=kb_employee(uid),
+            parse_mode="Markdown"
+        )
+        return
 
     conn = db()
     c = conn.cursor()
@@ -1201,4 +1275,3 @@ if __name__ == "__main__":
     # Start Flask for Render keep-alive
     print(f"✅ Flask running on PORT={PORT}")
     app.run(host="0.0.0.0", port=PORT)
-
