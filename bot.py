@@ -1,8 +1,6 @@
 import os
 import sqlite3
 import asyncio
-import threading
-import requests
 from datetime import datetime, timedelta, time as dtime
 
 from dotenv import load_dotenv
@@ -15,6 +13,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -30,22 +29,22 @@ from telegram.ext import (
 # =============================================================================
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN is missing! Set it in Render Environment Variables.")
+
+RENDER_URL = os.getenv("RENDER_URL", "").strip().rstrip("/")
+if not RENDER_URL:
+    raise ValueError("❌ RENDER_URL is missing! Set it in Render Environment Variables.")
 
 PORT = int(os.getenv("PORT", 10000))
 DB_NAME = "attendance.db"
 
-RENDER_URL = os.getenv("RENDER_URL", "https://npe-shift-bot-docker.onrender.com").rstrip("/")
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
-
 # ---------------------------
 # Roles
 # ---------------------------
-REAL_MANAGERS = {97965212, 1035761242}
-SUPERUSER = {6017492841}  # You
+REAL_MANAGERS = {97965212, 1035761242}      # Parham + Tohiid
+SUPERUSER = {6017492841}                   # You (Full Access)
 ADMIN_USERS = REAL_MANAGERS | SUPERUSER
 
 # ---------------------------
@@ -58,7 +57,7 @@ SHIFTS = [
 ]
 
 # ---------------------------
-# Jobs
+# Reminders / Reports
 # ---------------------------
 REMINDER_MINUTES_BEFORE_SHIFT = 15
 LATE_ALERT_MINUTES_AFTER_SHIFT_START = 5
@@ -67,28 +66,13 @@ NIGHTLY_REPORT_HOUR = 23
 NIGHTLY_REPORT_MINUTE = 59
 
 # =============================================================================
-# Flask app (Webhook + healthcheck)
+# Flask app (Webhook + Keepalive)
 # =============================================================================
 app = Flask(__name__)
 
-application = None
-bot_ready = False
-
 @app.get("/")
 def home():
-    return "✅ Bot is running (Webhook mode OK)", 200
-
-@app.post(WEBHOOK_PATH)
-def webhook():
-    global application, bot_ready
-    if not bot_ready or application is None:
-        return "bot not ready", 503
-
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    application.update_queue.put(update)
-    return "ok", 200
-
+    return "✅ Bot is running (Render keep-alive OK)", 200
 
 # =============================================================================
 # Database
@@ -100,7 +84,6 @@ def init_db():
     conn = db()
     c = conn.cursor()
 
-    # Employees
     c.execute("""
         CREATE TABLE IF NOT EXISTS employees (
             user_id INTEGER PRIMARY KEY,
@@ -111,7 +94,6 @@ def init_db():
         )
     """)
 
-    # Shift assignments (persistent)
     c.execute("""
         CREATE TABLE IF NOT EXISTS employee_shifts (
             user_id INTEGER PRIMARY KEY,
@@ -120,7 +102,6 @@ def init_db():
         )
     """)
 
-    # Attendance (daily)
     c.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,7 +115,6 @@ def init_db():
         )
     """)
 
-    # Shift notes (handover)
     c.execute("""
         CREATE TABLE IF NOT EXISTS shift_notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,7 +127,6 @@ def init_db():
         )
     """)
 
-    # Manager announcements
     c.execute("""
         CREATE TABLE IF NOT EXISTS manager_notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,7 +136,6 @@ def init_db():
         )
     """)
 
-    # Leave requests
     c.execute("""
         CREATE TABLE IF NOT EXISTS leave_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -260,7 +238,6 @@ def get_employee_shift(user_id: int):
     conn.close()
     return row[0] if row else None
 
-
 # =============================================================================
 # Keyboards
 # =============================================================================
@@ -310,12 +287,10 @@ def ikb_leave_approve_reject(req_id: int):
         ]
     ])
 
-
 # =============================================================================
 # Conversation states
 # =============================================================================
 REG_FULLNAME, EMP_NOTE, LEAVE_REASON, MANAGER_NOTE, ASSIGN_SHIFT_USER, ASSIGN_SHIFT_SHIFT = range(6)
-
 
 # =============================================================================
 # Helpers
@@ -345,7 +320,6 @@ async def check_employee_access(update: Update, context: ContextTypes.DEFAULT_TY
         return False
     return True
 
-
 # =============================================================================
 # Start / Help
 # =============================================================================
@@ -366,7 +340,7 @@ HELP_TEXT = (
     "• تایید کارمندها\n"
     "• تعیین/تغییر شیفت کارمندها\n"
     "• گزارش امروز + مرخصی‌ها + پیام مدیر\n\n"
-    "✅ نکته: کارمند جدید باید «ثبت‌نام کارمند» را یکبار انجام دهد."
+    "✅ نکته: کارمند جدید فقط یکبار باید «ثبت‌نام کارمند» را انجام دهد."
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -374,7 +348,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, reply_markup=kb_main(update.effective_user.id))
-
 
 # =============================================================================
 # Panels
@@ -390,7 +363,6 @@ async def manager_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     role = "سوپر یوزر" if user.id in SUPERUSER else "مدیر"
     await update.message.reply_text(f"👨‍💼 پنل {role}", reply_markup=kb_manager(user.id))
-
 
 # =============================================================================
 # Employee Registration
@@ -467,19 +439,7 @@ async def approve_reject_callback(update: Update, context: ContextTypes.DEFAULT_
             pass
 
 # =============================================================================
-# (بقیه‌ی کد دقیقاً همون کد تو هست…)
-# =============================================================================
-# ✅ از اینجا به بعد همان بخش‌های Manager / Attendance / Notes / Leave / Jobs / Router
-# ✅ که خودت دادی بدون تغییر در این نسخه هست.
-# ✅ فقط bot_main و __main__ تغییر کرده برای webhook.
-
-# ---------------------------------------------------------------------
-# ⚠️ برای اینکه پیام بیش از حد طولانی نشه:
-# من همین الان در پیام بعدی، ادامه‌ی کامل کد (از manager_pending_employees تا آخر main)
-# رو میدم تا فایل 100% کامل و یک‌تکه باشه.
-# ---------------------------------------------------------------------
-# =============================================================================
-# Manager features
+# Manager Features
 # =============================================================================
 async def manager_pending_employees(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_USERS:
@@ -519,9 +479,8 @@ async def list_employees(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, reply_markup=kb_manager(update.effective_user.id))
 
-
 # =============================================================================
-# Shift assignment persistent
+# Shift Assignment
 # =============================================================================
 async def assign_shift_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_USERS:
@@ -573,7 +532,10 @@ async def assign_shift_shift(update: Update, context: ContextTypes.DEFAULT_TYPE)
     set_employee_shift(emp_id, shift_id)
     s = get_shift_by_id(shift_id)
 
-    await update.message.reply_text(f"✅ شیفت کارمند تنظیم شد: {s[1]} ({s[2]}-{s[3]})", reply_markup=kb_manager(update.effective_user.id))
+    await update.message.reply_text(
+        f"✅ شیفت کارمند تنظیم شد: {s[1]} ({s[2]}-{s[3]})",
+        reply_markup=kb_manager(update.effective_user.id)
+    )
 
     try:
         await context.bot.send_message(chat_id=emp_id, text=f"📌 شیفت شما تغییر کرد:\n\n{s[1]} ({s[2]}-{s[3]}) ✅")
@@ -582,9 +544,8 @@ async def assign_shift_shift(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     return ConversationHandler.END
 
-
 # =============================================================================
-# Employee "My shift"
+# Employee My Shift
 # =============================================================================
 async def my_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_employee_access(update, context):
@@ -598,7 +559,6 @@ async def my_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     s = get_shift_by_id(shift_id)
-
     yday = (datetime.now().date() - timedelta(days=1)).isoformat()
 
     conn = db()
@@ -626,22 +586,18 @@ async def my_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🕒 شیفت شما:\n\n"
         f"✅ {s[1]}\n"
         f"⏰ ساعت: {s[2]} تا {s[3]}\n\n"
+        "📜 توضیح شیفت قبلی:\n"
     )
 
-    text += "📜 توضیح شیفت قبلی:\n"
     if prev_note:
         text += f"👤 {prev_note[0]}\n{prev_note[1]}\n\n"
     else:
         text += "— موردی ثبت نشده.\n\n"
 
     text += "📝 پیام مدیر:\n"
-    if mgr_note:
-        text += mgr_note[0]
-    else:
-        text += "— پیامی ثبت نشده."
+    text += mgr_note[0] if mgr_note else "— پیامی ثبت نشده."
 
     await update.message.reply_text(text, reply_markup=kb_employee(user.id))
-
 
 # =============================================================================
 # Attendance
@@ -686,7 +642,8 @@ async def employee_check_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c.execute("""
         INSERT INTO attendance (date, user_id, full_name, shift_id, check_in_time, delay_minutes)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (date_str, user.id, get_employee_full_name(user.id) or user.full_name, shift_id, now.isoformat(timespec="seconds"), delay))
+    """, (date_str, user.id, get_employee_full_name(user.id) or user.full_name, shift_id,
+          now.isoformat(timespec="seconds"), delay))
     conn.commit()
     conn.close()
 
@@ -698,7 +655,10 @@ async def employee_check_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=kb_employee(user.id)
     )
 
-    await notify_real_managers(context, f"📌 ثبت ورود\n\n👤 {get_employee_full_name(user.id) or user.full_name}\n🗓️ {date_str}\n🕒 {shift[1]}\n⏱️ تاخیر: {delay} دقیقه")
+    await notify_real_managers(
+        context,
+        f"📌 ثبت ورود\n\n👤 {get_employee_full_name(user.id) or user.full_name}\n🗓️ {date_str}\n🕒 {shift[1]}\n⏱️ تاخیر: {delay} دقیقه"
+    )
 
 async def employee_check_out(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_employee_access(update, context):
@@ -724,7 +684,10 @@ async def employee_check_out(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.close()
 
     await update.message.reply_text("✅ خروج ثبت شد. خسته نباشی 🌟", reply_markup=kb_employee(user.id))
-    await notify_real_managers(context, f"✅ ثبت خروج\n\n👤 {get_employee_full_name(user.id) or user.full_name}\n🗓️ {date_str}\n🕒 ساعت: {now.strftime('%H:%M')}")
+    await notify_real_managers(
+        context,
+        f"✅ ثبت خروج\n\n👤 {get_employee_full_name(user.id) or user.full_name}\n🗓️ {date_str}\n🕒 ساعت: {now.strftime('%H:%M')}"
+    )
 
 async def employee_status_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_employee_access(update, context):
@@ -752,7 +715,6 @@ async def employee_status_today(update: Update, context: ContextTypes.DEFAULT_TY
 
     await update.message.reply_text(text, reply_markup=kb_employee(user.id))
 
-
 # =============================================================================
 # Notes (handover)
 # =============================================================================
@@ -773,7 +735,8 @@ async def employee_note_save(update: Update, context: ContextTypes.DEFAULT_TYPE)
     c.execute("""
         INSERT INTO shift_notes (date, user_id, full_name, shift_id, note, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (date_str, user.id, get_employee_full_name(user.id) or user.full_name, shift_id or 0, text, datetime.now().isoformat(timespec="seconds")))
+    """, (date_str, user.id, get_employee_full_name(user.id) or user.full_name,
+          shift_id or 0, text, datetime.now().isoformat(timespec="seconds")))
     conn.commit()
     conn.close()
 
@@ -820,7 +783,6 @@ async def previous_shift_notes(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await update.message.reply_text(text, reply_markup=kb_employee(update.effective_user.id))
 
-
 # =============================================================================
 # Leave
 # =============================================================================
@@ -840,7 +802,8 @@ async def leave_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c.execute("""
         INSERT INTO leave_requests (date, user_id, full_name, reason, status, created_at)
         VALUES (?, ?, ?, ?, 'pending', ?)
-    """, (date_str, user.id, get_employee_full_name(user.id) or user.full_name, reason, datetime.now().isoformat(timespec="seconds")))
+    """, (date_str, user.id, get_employee_full_name(user.id) or user.full_name, reason,
+          datetime.now().isoformat(timespec="seconds")))
     req_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -898,7 +861,6 @@ async def leave_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-
 # =============================================================================
 # Manager note + report
 # =============================================================================
@@ -954,8 +916,8 @@ async def manager_report_today(update: Update, context: ContextTypes.DEFAULT_TYP
     if rows:
         text += "✅ حضور و غیاب:\n"
         for full_name, shift_id, cin, cout, delay in rows:
-            cin_t = cin.split('T')[-1] if cin else "—"
-            cout_t = cout.split('T')[-1] if cout else "—"
+            cin_t = cin.split("T")[-1] if cin else "—"
+            cout_t = cout.split("T")[-1] if cout else "—"
             text += f"• {full_name} | شیفت {shift_id} | ورود: {cin_t} | خروج: {cout_t} | تاخیر: {delay}m\n"
     else:
         text += "— هنوز ورود/خروج ثبت نشده.\n"
@@ -968,7 +930,6 @@ async def manager_report_today(update: Update, context: ContextTypes.DEFAULT_TYP
         text += "— موردی ثبت نشده.\n"
 
     await update.message.reply_text(text, reply_markup=kb_manager(update.effective_user.id))
-
 
 # =============================================================================
 # Jobs: reminders + late alert + nightly report
@@ -1017,15 +978,17 @@ async def job_late_alert(context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT user_id FROM employee_shifts WHERE shift_id=?", (shift_id,))
             assigned = [r[0] for r in c.fetchall()]
 
-            c.execute("SELECT user_id FROM attendance WHERE date=? AND shift_id=? AND check_in_time IS NOT NULL", (date_str, shift_id))
+            c.execute("""
+                SELECT user_id
+                FROM attendance
+                WHERE date=? AND shift_id=? AND check_in_time IS NOT NULL
+            """, (date_str, shift_id))
             checked = {r[0] for r in c.fetchall()}
             conn.close()
 
             late_people = [uid for uid in assigned if uid not in checked]
             if late_people:
-                names = []
-                for uid in late_people:
-                    names.append(get_employee_full_name(uid) or str(uid))
+                names = [get_employee_full_name(uid) or str(uid) for uid in late_people]
 
                 await notify_real_managers(
                     context,
@@ -1064,8 +1027,8 @@ async def job_nightly_report(context: ContextTypes.DEFAULT_TYPE):
     if rows:
         text += "✅ حضور و غیاب:\n"
         for full_name, shift_id, cin, cout, delay in rows:
-            cin_t = cin.split('T')[-1] if cin else "—"
-            cout_t = cout.split('T')[-1] if cout else "—"
+            cin_t = cin.split("T")[-1] if cin else "—"
+            cout_t = cout.split("T")[-1] if cout else "—"
             text += f"• {full_name} | شیفت {shift_id} | ورود: {cin_t} | خروج: {cout_t} | تاخیر: {delay}m\n"
     else:
         text += "— هیچ ورودی ثبت نشده.\n"
@@ -1078,7 +1041,6 @@ async def job_nightly_report(context: ContextTypes.DEFAULT_TYPE):
         text += "— موردی ثبت نشده.\n"
 
     await notify_real_managers(context, text)
-
 
 # =============================================================================
 # Router
@@ -1097,8 +1059,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await help_cmd(update, context)
 
     if text == "📌 ثبت‌نام کارمند":
-        await register_employee_start(update, context)
-        return
+        return await register_employee_start(update, context)
 
     if text == "🕒 شیفت من":
         return await my_shift(update, context)
@@ -1137,7 +1098,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await manager_report_today(update, context)
 
     if text == "🏖️ مرخصی‌ها":
-        await update.message.reply_text("✅ درخواست‌های مرخصی از طریق پیام‌های تایید/رد مدیریت می‌شوند.", reply_markup=kb_manager(user_id))
+        await update.message.reply_text("✅ درخواست‌های مرخصی با دکمه تایید/رد مدیریت می‌شوند.", reply_markup=kb_manager(user_id))
         return
 
     if text == "⬅️ بازگشت به منوی اصلی":
@@ -1146,105 +1107,83 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("❓ متوجه نشدم. از دکمه‌ها استفاده کن.", reply_markup=kb_main(user_id))
 
+# =============================================================================
+# Telegram webhook setup
+# =============================================================================
+async def set_webhook(application: Application):
+    webhook_url = f"{RENDER_URL}/webhook"
+    await application.bot.set_webhook(webhook_url)
+    print(f"✅ Webhook set to: {webhook_url}")
 
 # =============================================================================
-# Webhook setup + Bot main
+# Main app
 # =============================================================================
-def set_webhook():
-    try:
-        requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true",
-            timeout=10
-        )
-        r = requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}",
-            timeout=10
-        )
-        print("✅ setWebhook response:", r.text)
-    except Exception as e:
-        print("❌ webhook setup failed:", e)
+application = Application.builder().token(BOT_TOKEN).build()
 
+# Commands
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_cmd))
 
-async def bot_main():
-    global application, bot_ready
+# Callbacks
+application.add_handler(CallbackQueryHandler(approve_reject_callback, pattern=r"^(approve|reject):"))
+application.add_handler(CallbackQueryHandler(leave_callback, pattern=r"^(leave_approve|leave_reject):"))
+
+# Conversations
+application.add_handler(ConversationHandler(
+    entry_points=[MessageHandler(filters.Regex("^📌 ثبت‌نام کارمند$"), register_employee_start)],
+    states={REG_FULLNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_employee_save)]},
+    fallbacks=[],
+))
+
+application.add_handler(ConversationHandler(
+    entry_points=[MessageHandler(filters.Regex("^✍️ ثبت توضیح برای شیفت بعد$"), employee_note_start)],
+    states={EMP_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, employee_note_save)]},
+    fallbacks=[],
+))
+
+application.add_handler(ConversationHandler(
+    entry_points=[MessageHandler(filters.Regex("^🏖️ درخواست مرخصی$"), leave_start)],
+    states={LEAVE_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, leave_save)]},
+    fallbacks=[],
+))
+
+application.add_handler(ConversationHandler(
+    entry_points=[MessageHandler(filters.Regex("^📝 پیام مدیر$"), manager_note_start)],
+    states={MANAGER_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, manager_note_save)]},
+    fallbacks=[],
+))
+
+application.add_handler(ConversationHandler(
+    entry_points=[MessageHandler(filters.Regex("^🗓️ تعیین/تغییر شیفت کارمند$"), assign_shift_start)],
+    states={
+        ASSIGN_SHIFT_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, assign_shift_user)],
+        ASSIGN_SHIFT_SHIFT: [MessageHandler(filters.TEXT & ~filters.COMMAND, assign_shift_shift)],
+    },
+    fallbacks=[],
+))
+
+# Router
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_buttons))
+
+# Jobs
+application.job_queue.run_repeating(job_shift_reminder, interval=60, first=10)
+application.job_queue.run_repeating(job_late_alert, interval=60, first=20)
+application.job_queue.run_repeating(job_nightly_report, interval=60, first=30)
+
+# Flask webhook endpoint
+@app.post("/webhook")
+def webhook():
+    data = request.get_json(force=True)
+    asyncio.run(application.update_queue.put(Update.de_json(data, application.bot)))
+    return "ok", 200
+
+def run():
     init_db()
-
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # Commands
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_cmd))
-
-    # Callbacks
-    application.add_handler(CallbackQueryHandler(approve_reject_callback, pattern=r"^(approve|reject):"))
-    application.add_handler(CallbackQueryHandler(leave_callback, pattern=r"^(leave_approve|leave_reject):"))
-
-    # Conversations
-    application.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📌 ثبت‌نام کارمند$"), register_employee_start)],
-        states={REG_FULLNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_employee_save)]},
-        fallbacks=[],
-    ))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^✍️ ثبت توضیح برای شیفت بعد$"), employee_note_start)],
-        states={EMP_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, employee_note_save)]},
-        fallbacks=[],
-    ))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🏖️ درخواست مرخصی$"), leave_start)],
-        states={LEAVE_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, leave_save)]},
-        fallbacks=[],
-    ))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📝 پیام مدیر$"), manager_note_start)],
-        states={MANAGER_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, manager_note_save)]},
-        fallbacks=[],
-    ))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🗓️ تعیین/تغییر شیفت کارمند$"), assign_shift_start)],
-        states={
-            ASSIGN_SHIFT_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, assign_shift_user)],
-            ASSIGN_SHIFT_SHIFT: [MessageHandler(filters.TEXT & ~filters.COMMAND, assign_shift_shift)],
-        },
-        fallbacks=[],
-    ))
-
-    # Router
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_buttons))
-
-    # Jobs
-    application.job_queue.run_repeating(job_shift_reminder, interval=60, first=10)
-    application.job_queue.run_repeating(job_late_alert, interval=60, first=20)
-    application.job_queue.run_repeating(job_nightly_report, interval=60, first=30)
-
-    # Initialize but DO NOT start polling
-    await application.initialize()
-    await application.start()
-
-    bot_ready = True
-    print("✅ Telegram bot started in webhook mode (no polling)!")
-
-    await asyncio.Event().wait()
-
-
-def run_bot_thread():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(bot_main())
-
-
-# =============================================================================
-# Main
-# =============================================================================
-if __name__ == "__main__":
-    threading.Thread(target=run_bot_thread, daemon=True).start()
-
-    print(f"✅ Setting webhook to: {WEBHOOK_URL}")
-    set_webhook()
-
-    print(f"✅ Flask running on PORT={PORT}")
+    asyncio.get_event_loop().run_until_complete(application.initialize())
+    asyncio.get_event_loop().run_until_complete(set_webhook(application))
+    asyncio.get_event_loop().run_until_complete(application.start())
+    print("✅ Bot started in webhook mode (NO POLLING).")
     app.run(host="0.0.0.0", port=PORT)
+
+if __name__ == "__main__":
+    run()
