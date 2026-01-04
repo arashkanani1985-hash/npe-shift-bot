@@ -1121,6 +1121,14 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================================================================
 async def bot_main():
     init_db()
+    # ✅ Auto-register SUPERUSER as approved employee
+    for uid in SUPERUSER:
+        upsert_employee(
+            user_id=uid,
+            username="arashkanani1985",
+            full_name="Arash Kanani",
+            status="approved"
+        )
 
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -1193,3 +1201,4 @@ if __name__ == "__main__":
     # Start Flask for Render keep-alive
     print(f"✅ Flask running on PORT={PORT}")
     app.run(host="0.0.0.0", port=PORT)
+
