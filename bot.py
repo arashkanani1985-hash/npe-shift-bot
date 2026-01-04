@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+NPE Broker Support - Shift Management Bot (FULL PRO - Polling)
+Author: Arsh (Superuser)
+"""
+
 import os
 import sqlite3
 import asyncio
@@ -5,7 +11,7 @@ import threading
 from datetime import datetime, timedelta, time as dtime
 
 from dotenv import load_dotenv
-from flask import Flask, request
+from flask import Flask
 
 from telegram import (
     Update,
@@ -33,25 +39,20 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN is missing! Set it in Render Environment Variables.")
 
-RENDER_URL = os.getenv("RENDER_URL")
-if not RENDER_URL:
-    raise ValueError("❌ RENDER_URL missing! Set it in Render Environment Variables. "
-                     "Example: https://npe-shift-bot-docker.onrender.com")
-
 PORT = int(os.getenv("PORT", 10000))
 DB_NAME = "attendance.db"
 
-COMPANY = "NPE Broker Support"
+COMPANY_NAME = "NPE Broker Support"
 
-# ---------------------------
-# Roles
-# ---------------------------
-REAL_MANAGERS = {97965212, 1035761242}   # Parham + Tohid
-SUPERUSER = {6017492841}                # YOU (creator)
+# =============================================================================
+# ROLES
+# =============================================================================
+REAL_MANAGERS = {97965212, 1035761242}   # Parham, Tohiid
+SUPERUSER = {6017492841}                # Creator (you)
 ADMIN_USERS = REAL_MANAGERS | SUPERUSER
 
 # =============================================================================
-# Shifts (Fixed hours)
+# SHIFT CONSTANTS (hours fixed)
 # =============================================================================
 SHIFTS = [
     (1, "شیفت 1", "08:00", "16:00"),
@@ -66,13 +67,13 @@ NIGHTLY_REPORT_HOUR = 23
 NIGHTLY_REPORT_MINUTE = 59
 
 # =============================================================================
-# FLASK APP (keep-alive + webhook)
+# FLASK (Render keep-alive)
 # =============================================================================
 app = Flask(__name__)
 
 @app.get("/")
 def home():
-    return f"✅ {COMPANY} Shift Bot is running!", 200
+    return f"✅ {COMPANY_NAME} - Shift Bot is running!", 200
 
 # =============================================================================
 # DATABASE
@@ -84,6 +85,7 @@ def init_db():
     conn = db()
     c = conn.cursor()
 
+    # Employees
     c.execute("""
         CREATE TABLE IF NOT EXISTS employees (
             user_id INTEGER PRIMARY KEY,
@@ -94,6 +96,7 @@ def init_db():
         )
     """)
 
+    # Shift assignments (persistent)
     c.execute("""
         CREATE TABLE IF NOT EXISTS employee_shifts (
             user_id INTEGER PRIMARY KEY,
@@ -102,6 +105,7 @@ def init_db():
         )
     """)
 
+    # Attendance (daily)
     c.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,6 +119,7 @@ def init_db():
         )
     """)
 
+    # Shift notes (handover)
     c.execute("""
         CREATE TABLE IF NOT EXISTS shift_notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +132,7 @@ def init_db():
         )
     """)
 
+    # Manager announcements
     c.execute("""
         CREATE TABLE IF NOT EXISTS manager_notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,6 +142,7 @@ def init_db():
         )
     """)
 
+    # Leave requests
     c.execute("""
         CREATE TABLE IF NOT EXISTS leave_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,7 +158,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_today_str():
+def today_str():
     return datetime.now().date().isoformat()
 
 def parse_hhmm(hhmm: str) -> dtime:
@@ -243,7 +250,7 @@ def get_employee_shift(user_id: int):
     return row[0] if row else None
 
 # =============================================================================
-# Keyboards (Back buttons everywhere)
+# KEYBOARDS
 # =============================================================================
 def kb_main(user_id: int):
     buttons = []
@@ -256,9 +263,9 @@ def kb_main(user_id: int):
 def kb_employee(user_id: int):
     rows = [
         [KeyboardButton("🕒 شیفت من"), KeyboardButton("✅ ثبت ورود"), KeyboardButton("❌ ثبت خروج")],
-        [KeyboardButton("✍️ ثبت توضیح برای شیفت بعد"), KeyboardButton("📜 توضیحات شیفت قبلی")],
+        [KeyboardButton("✍️ توضیح برای شیفت بعد"), KeyboardButton("📜 توضیح شیفت قبلی")],
         [KeyboardButton("🏖️ درخواست مرخصی"), KeyboardButton("📍 وضعیت امروز")],
-        [KeyboardButton("⬅️ بازگشت"), KeyboardButton("🏠 منوی اصلی")],
+        [KeyboardButton("⬅️ بازگشت به منوی اصلی")],
     ]
     status = get_employee_status(user_id)
     if user_id not in ADMIN_USERS and status in (None, "pending"):
@@ -269,194 +276,488 @@ def kb_manager(user_id: int):
     role = "سوپر یوزر" if user_id in SUPERUSER else "مدیر"
     rows = [
         [KeyboardButton("👥 تایید کارمندها"), KeyboardButton("🧾 لیست کارمندها")],
-        [KeyboardButton("🗓️ تعیین/تغییر شیفت کارمند"), KeyboardButton("📝 پیام مدیر")],
+        [KeyboardButton("🗓️ تعیین/تغییر شیفت"), KeyboardButton("📝 پیام مدیر")],
         [KeyboardButton("📊 گزارش امروز"), KeyboardButton("🏖️ مرخصی‌ها")],
-        [KeyboardButton("⬅️ بازگشت"), KeyboardButton("🏠 منوی اصلی")],
+        [KeyboardButton("⬅️ بازگشت به منوی اصلی")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def kb_back():
-    return ReplyKeyboardMarkup([[KeyboardButton("⬅️ بازگشت"), KeyboardButton("🏠 منوی اصلی")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([[KeyboardButton("⬅️ بازگشت"), KeyboardButton("⬅️ بازگشت به منوی اصلی")]], resize_keyboard=True)
 
-def kb_shift_select():
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("1"), KeyboardButton("2"), KeyboardButton("3")],
-         [KeyboardButton("⬅️ بازگشت"), KeyboardButton("🏠 منوی اصلی")]],
-        resize_keyboard=True
-    )
-
-def ikb_approve_reject(user_id: int):
+def ikb_approve_reject(emp_id: int):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ تایید", callback_data=f"approve:{user_id}"),
-            InlineKeyboardButton("❌ رد", callback_data=f"reject:{user_id}"),
+            InlineKeyboardButton("✅ تایید", callback_data=f"approve:{emp_id}"),
+            InlineKeyboardButton("❌ رد", callback_data=f"reject:{emp_id}")
         ]
     ])
 
-def ikb_leave_approve_reject(req_id: int):
+def ikb_leave(req_id: int):
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ تایید", callback_data=f"leave_approve:{req_id}"),
-            InlineKeyboardButton("❌ رد", callback_data=f"leave_reject:{req_id}"),
+            InlineKeyboardButton("❌ رد", callback_data=f"leave_reject:{req_id}")
         ]
     ])
 
 # =============================================================================
-# Conversation states
+# STATES
 # =============================================================================
 REG_FULLNAME, EMP_NOTE, LEAVE_REASON, MANAGER_NOTE, ASSIGN_SHIFT_USER, ASSIGN_SHIFT_SHIFT = range(6)
 
 # =============================================================================
-# Texts
+# TEXTS
 # =============================================================================
 WELCOME_TEXT = (
     f"👋 سلام!\n\n"
-    f"به سیستم مدیریت شیفت شرکت {COMPANY} خوش آمدید ✅\n\n"
+    f"✅ به سیستم مدیریت شیفت شرکت *{COMPANY_NAME}* خوش آمدید.\n\n"
     "لطفاً نقش خود را انتخاب کنید:"
 )
 
 HELP_TEXT = (
-    f"ℹ️ راهنما | {COMPANY}\n\n"
+    f"ℹ️ راهنما | {COMPANY_NAME}\n\n"
     "👤 پنل کارمند:\n"
-    "• شیفت من\n"
-    "• ثبت ورود/خروج\n"
-    "• توضیحات شیفت قبلی و ثبت توضیح برای شیفت بعد\n"
-    "• درخواست مرخصی\n\n"
+    "• شیفت من\n• ثبت ورود/خروج\n• توضیح شیفت قبلی و ثبت توضیح برای بعد\n• درخواست مرخصی\n\n"
     "👨‍💼 پنل مدیر:\n"
-    "• تایید کارمندها\n"
-    "• تعیین/تغییر شیفت کارمندها\n"
-    "• گزارش امروز + مرخصی‌ها + پیام مدیر\n\n"
-    "✅ نکته: کارمند جدید فقط یکبار ثبت‌نام می‌کند و سپس مدیر تایید می‌کند."
+    "• تایید کارمندها\n• تعیین/تغییر شیفت\n• گزارش امروز + مرخصی‌ها + پیام مدیر\n"
+)
+
+REMINDER_TEXT = (
+    f"⏰ یادآوری شروع شیفت | {COMPANY_NAME}\n\n"
+    "سلام {name} 🌟\n"
+    "تا {minutes} دقیقه دیگر شیفت شما شروع می‌شود:\n"
+    "🕒 {shift_name} ({start}-{end})\n\n"
+    "✅ لطفاً رأس زمان شروع شیفت، از داخل ربات گزینه «ثبت ورود» را بزنید.\n"
+    "موفق باشید 🌿"
+)
+
+LATE_ALERT_TEXT = (
+    f"⚠️ هشدار عدم ثبت ورود | {COMPANY_NAME}\n\n"
+    "برای شیفت {shift_name} تا {late} دقیقه بعد از شروع شیفت، هنوز ورود ثبت نشده برای:\n"
+    "{list}\n\n"
+    "لطفاً بررسی شود."
 )
 
 # =============================================================================
-# Helpers notify
+# HELPERS
 # =============================================================================
-async def notify_admins(context: ContextTypes.DEFAULT_TYPE, text: str):
-    for mid in ADMIN_USERS:
-        try:
-            await context.bot.send_message(chat_id=mid, text=text)
-        except:
-            pass
-
 async def notify_real_managers(context: ContextTypes.DEFAULT_TYPE, text: str):
-    for mid in REAL_MANAGERS:
+    for mid in REAL_MANAGERS | SUPERUSER:  # superuser also receives
         try:
             await context.bot.send_message(chat_id=mid, text=text)
         except:
             pass
 
-async def check_employee_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    user = update.effective_user
-    if user.id in ADMIN_USERS:
+async def must_be_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid in ADMIN_USERS:
         return True
-
-    status = get_employee_status(user.id)
-    if status != "approved":
-        await update.message.reply_text(
-            "⛔ هنوز تایید نشده‌ای.\nابتدا «📌 ثبت‌نام کارمند» را انجام بده و منتظر تایید مدیر باش.",
-            reply_markup=kb_employee(user.id)
-        )
+    if get_employee_status(uid) != "approved":
+        await update.message.reply_text("⛔ هنوز تایید نشده‌ای. ابتدا ثبت‌نام کن.", reply_markup=kb_employee(uid))
         return False
     return True
 
 # =============================================================================
-# Start / Help
+# COMMANDS
 # =============================================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(WELCOME_TEXT, reply_markup=kb_main(update.effective_user.id))
+    await update.message.reply_text(WELCOME_TEXT, reply_markup=kb_main(update.effective_user.id), parse_mode="Markdown")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, reply_markup=kb_main(update.effective_user.id))
 
 # =============================================================================
-# Panels
+# PANELS
 # =============================================================================
 async def employee_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"👤 پنل کارمند | {COMPANY}", reply_markup=kb_employee(update.effective_user.id))
+    await update.message.reply_text("👤 پنل کارمند", reply_markup=kb_employee(update.effective_user.id))
 
 async def manager_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id not in ADMIN_USERS:
-        await update.message.reply_text("❌ فقط مدیر دسترسی دارد.", reply_markup=kb_main(user.id))
+    uid = update.effective_user.id
+    if uid not in ADMIN_USERS:
+        await update.message.reply_text("❌ فقط مدیر دسترسی دارد.", reply_markup=kb_main(uid))
         return
-    role = "سوپر یوزر" if user.id in SUPERUSER else "مدیر"
-    await update.message.reply_text(f"👨‍💼 پنل {role} | {COMPANY}", reply_markup=kb_manager(user.id))
+    role = "سوپر یوزر" if uid in SUPERUSER else "مدیر"
+    await update.message.reply_text(f"👨‍💼 پنل {role}", reply_markup=kb_manager(uid))
 
 # =============================================================================
-# Registration
+# REGISTRATION
 # =============================================================================
 async def register_employee_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id in ADMIN_USERS:
-        await update.message.reply_text("✅ شما مدیر/سوپر یوزر هستید و نیازی به ثبت‌نام ندارید.", reply_markup=kb_employee(user.id))
+    uid = update.effective_user.id
+    if uid in ADMIN_USERS:
+        await update.message.reply_text("✅ شما مدیر هستید و نیازی به ثبت‌نام ندارید.", reply_markup=kb_employee(uid))
         return ConversationHandler.END
 
-    status = get_employee_status(user.id)
-    if status == "approved":
-        await update.message.reply_text("✅ شما قبلاً تایید شده‌اید.", reply_markup=kb_employee(user.id))
+    if get_employee_status(uid) == "approved":
+        await update.message.reply_text("✅ شما قبلاً تایید شده‌اید.", reply_markup=kb_employee(uid))
         return ConversationHandler.END
 
-    await update.message.reply_text("📝 لطفاً نام و نام خانوادگی خود را وارد کن:", reply_markup=kb_back())
+    await update.message.reply_text("📝 نام و نام خانوادگی را وارد کن:", reply_markup=kb_back())
     return REG_FULLNAME
 
 async def register_employee_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if update.message.text.strip() in ["⬅️ بازگشت", "🏠 منوی اصلی"]:
+    uid = update.effective_user.id
+    txt = update.message.text.strip()
+
+    if txt in ["⬅️ بازگشت", "⬅️ بازگشت به منوی اصلی"]:
         await start(update, context)
         return ConversationHandler.END
 
-    full_name = update.message.text.strip()
-    upsert_employee(user.id, user.username or "", full_name, "pending")
+    upsert_employee(uid, update.effective_user.username or "", txt, "pending")
 
-    await update.message.reply_text("✅ ثبت‌نام انجام شد. منتظر تایید مدیر باشید.", reply_markup=kb_employee(user.id))
+    await update.message.reply_text("✅ ثبت شد. منتظر تایید مدیر باشید.", reply_markup=kb_employee(uid))
 
-    msg = (
-        f"👤 درخواست ثبت‌نام کارمند | {COMPANY}\n\n"
-        f"نام: {full_name}\n"
-        f"ID: {user.id}\n"
-    )
-    if user.username:
-        msg += f"یوزرنیم: @{user.username}\n"
-    msg += "\n✅ تایید / ❌ رد ؟"
+    msg = f"👤 درخواست ثبت‌نام\n\nنام: {txt}\nID: {uid}"
+    if update.effective_user.username:
+        msg += f"\n@{update.effective_user.username}"
+    msg += "\n\n✅ تایید / ❌ رد ؟"
 
     for mid in ADMIN_USERS:
         try:
-            await context.bot.send_message(chat_id=mid, text=msg, reply_markup=ikb_approve_reject(user.id))
+            await context.bot.send_message(chat_id=mid, text=msg, reply_markup=ikb_approve_reject(uid))
         except:
             pass
 
     return ConversationHandler.END
 
 async def approve_reject_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
 
-    if query.from_user.id not in ADMIN_USERS:
-        await query.edit_message_text("❌ فقط مدیر اجازه تایید/رد دارد.")
+    if q.from_user.id not in ADMIN_USERS:
+        await q.edit_message_text("❌ فقط مدیر اجازه دارد.")
         return
 
-    action, emp_id_str = query.data.split(":")
+    action, emp_id_str = q.data.split(":")
     emp_id = int(emp_id_str)
 
     if action == "approve":
         set_employee_status(emp_id, "approved")
-        await query.edit_message_text("✅ تایید شد.")
+        await q.edit_message_text("✅ تایید شد.")
         try:
-            await context.bot.send_message(chat_id=emp_id, text=f"✅ حساب شما در {COMPANY} تایید شد. خوش آمدید 🌟")
+            await context.bot.send_message(chat_id=emp_id, text=f"✅ حساب شما در {COMPANY_NAME} تایید شد. خوش آمدید 🌟")
         except:
             pass
 
     elif action == "reject":
         set_employee_status(emp_id, "rejected")
-        await query.edit_message_text("❌ رد شد.")
+        await q.edit_message_text("❌ رد شد.")
         try:
-            await context.bot.send_message(chat_id=emp_id, text="❌ درخواست شما تایید نشد.")
+            await context.bot.send_message(chat_id=emp_id, text="❌ درخواست شما رد شد.")
         except:
             pass
 
 # =============================================================================
-# Manager functions
+# EMPLOYEE FEATURES
+# =============================================================================
+def get_today_attendance(user_id: int, date_str: str):
+    conn = db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, shift_id, check_in_time, check_out_time, delay_minutes
+        FROM attendance WHERE date=? AND user_id=?
+        ORDER BY id DESC LIMIT 1
+    """, (date_str, user_id))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+async def my_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await must_be_employee(update, context):
+        return
+
+    uid = update.effective_user.id
+    shift_id = get_employee_shift(uid)
+
+    if not shift_id:
+        await update.message.reply_text("❌ شیفت شما هنوز توسط مدیر تنظیم نشده.", reply_markup=kb_employee(uid))
+        return
+
+    s = get_shift_by_id(shift_id)
+    yday = (datetime.now().date() - timedelta(days=1)).isoformat()
+
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT full_name, note FROM shift_notes WHERE date=? ORDER BY id DESC LIMIT 1", (yday,))
+    prev_note = c.fetchone()
+
+    c.execute("SELECT note FROM manager_notes WHERE date=? ORDER BY id DESC LIMIT 1", (yday,))
+    mgr_note = c.fetchone()
+    conn.close()
+
+    text = (
+        f"🕒 شیفت شما | {COMPANY_NAME}\n\n"
+        f"✅ {s[1]}\n"
+        f"⏰ {s[2]} تا {s[3]}\n\n"
+    )
+
+    text += "📜 توضیح شیفت قبلی:\n"
+    if prev_note:
+        text += f"👤 {prev_note[0]}\n{prev_note[1]}\n\n"
+    else:
+        text += "— موردی ثبت نشده.\n\n"
+
+    text += "📝 پیام مدیر:\n"
+    text += mgr_note[0] if mgr_note else "— پیامی ثبت نشده."
+
+    await update.message.reply_text(text, reply_markup=kb_employee(uid))
+
+async def employee_check_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await must_be_employee(update, context):
+        return
+
+    user = update.effective_user
+    uid = user.id
+    date_str = today_str()
+    shift_id = get_employee_shift(uid)
+
+    if not shift_id:
+        await update.message.reply_text("❌ شیفت شما هنوز تنظیم نشده. با مدیر تماس بگیرید.", reply_markup=kb_employee(uid))
+        return
+
+    existing = get_today_attendance(uid, date_str)
+    if existing and existing[2]:
+        await update.message.reply_text("✅ ورود شما قبلاً ثبت شده است.", reply_markup=kb_employee(uid))
+        return
+
+    shift = get_shift_by_id(shift_id)
+    now = datetime.now()
+    shift_start_dt = datetime.combine(now.date(), parse_hhmm(shift[2]))
+    delay = max(0, int((now - shift_start_dt).total_seconds() // 60))
+
+    full_name = get_employee_full_name(uid) or user.full_name
+
+    conn = db()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO attendance (date, user_id, full_name, shift_id, check_in_time, delay_minutes)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (date_str, uid, full_name, shift_id, now.isoformat(timespec="seconds"), delay))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        f"✅ ورود ثبت شد!\n\n"
+        f"👤 {full_name}\n"
+        f"🕒 {shift[1]} ({shift[2]}-{shift[3]})\n"
+        f"⏱️ تاخیر: {delay} دقیقه",
+        reply_markup=kb_employee(uid)
+    )
+
+    await notify_real_managers(context, f"📌 ثبت ورود\n\n👤 {full_name}\n🗓️ {date_str}\n🕒 {shift[1]}\n⏱️ تاخیر: {delay} دقیقه")
+
+async def employee_check_out(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await must_be_employee(update, context):
+        return
+
+    uid = update.effective_user.id
+    date_str = today_str()
+
+    row = get_today_attendance(uid, date_str)
+    if not row or not row[2]:
+        await update.message.reply_text("❌ هنوز ورود ثبت نکرده‌اید.", reply_markup=kb_employee(uid))
+        return
+    if row[3]:
+        await update.message.reply_text("✅ خروج شما قبلاً ثبت شده است.", reply_markup=kb_employee(uid))
+        return
+
+    now = datetime.now()
+
+    conn = db()
+    c = conn.cursor()
+    c.execute("UPDATE attendance SET check_out_time=? WHERE id=?", (now.isoformat(timespec="seconds"), row[0]))
+    conn.commit()
+    conn.close()
+
+    full_name = get_employee_full_name(uid) or update.effective_user.full_name
+    await update.message.reply_text("✅ خروج ثبت شد. خسته نباشی 🌟", reply_markup=kb_employee(uid))
+    await notify_real_managers(context, f"✅ ثبت خروج\n\n👤 {full_name}\n🗓️ {date_str}\n🕒 ساعت: {now.strftime('%H:%M')}")
+
+async def employee_status_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await must_be_employee(update, context):
+        return
+
+    uid = update.effective_user.id
+    date_str = today_str()
+    shift_id = get_employee_shift(uid)
+    att = get_today_attendance(uid, date_str)
+
+    text = f"📍 وضعیت امروز ({date_str})\n\n"
+    if shift_id:
+        s = get_shift_by_id(shift_id)
+        text += f"🕒 شیفت: {s[1]} ({s[2]}-{s[3]})\n\n"
+    else:
+        text += "🕒 شیفت: تعیین نشده\n\n"
+
+    if att:
+        text += f"✅ ورود: {att[2]}\n"
+        text += f"❌ خروج: {att[3] or 'ثبت نشده'}\n"
+        text += f"⏱️ تاخیر: {att[4]} دقیقه\n"
+    else:
+        text += "❌ ورود ثبت نشده.\n"
+
+    await update.message.reply_text(text, reply_markup=kb_employee(uid))
+
+# =============================================================================
+# Notes (handover)
+# =============================================================================
+async def employee_note_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await must_be_employee(update, context):
+        return ConversationHandler.END
+    await update.message.reply_text("✍️ توضیح خود را برای شیفت بعد بنویس:", reply_markup=kb_back())
+    return EMP_NOTE
+
+async def employee_note_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    txt = update.message.text.strip()
+
+    if txt in ["⬅️ بازگشت", "⬅️ بازگشت به منوی اصلی"]:
+        await start(update, context)
+        return ConversationHandler.END
+
+    date_str = today_str()
+    shift_id = get_employee_shift(uid) or 0
+    full_name = get_employee_full_name(uid) or update.effective_user.full_name
+
+    conn = db()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO shift_notes (date, user_id, full_name, shift_id, note, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (date_str, uid, full_name, shift_id, txt, datetime.now().isoformat(timespec="seconds")))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text("✅ توضیح ثبت شد و به مدیر ارسال شد.", reply_markup=kb_employee(uid))
+    await notify_real_managers(context, f"📝 توضیح شیفت بعد\n\n👤 {full_name}\n🗓️ {date_str}\n\n{txt}")
+
+    return ConversationHandler.END
+
+async def previous_shift_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await must_be_employee(update, context):
+        return
+
+    yday = (datetime.now().date() - timedelta(days=1)).isoformat()
+
+    conn = db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT full_name, shift_id, note
+        FROM shift_notes
+        WHERE date=?
+        ORDER BY id DESC LIMIT 1
+    """, (yday,))
+    row = c.fetchone()
+
+    c.execute("""
+        SELECT note
+        FROM manager_notes
+        WHERE date=?
+        ORDER BY id DESC LIMIT 1
+    """, (yday,))
+    mgr = c.fetchone()
+
+    conn.close()
+
+    text = "📜 توضیحات شیفت قبلی:\n\n"
+    if row:
+        text += f"👤 {row[0]} | شیفت {row[1]}\n\n{row[2]}\n\n"
+    else:
+        text += "— موردی ثبت نشده.\n\n"
+
+    text += "📝 پیام مدیر:\n\n"
+    text += mgr[0] if mgr else "— پیامی ثبت نشده."
+
+    await update.message.reply_text(text, reply_markup=kb_employee(update.effective_user.id))
+
+# =============================================================================
+# Leave
+# =============================================================================
+async def leave_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await must_be_employee(update, context):
+        return ConversationHandler.END
+    await update.message.reply_text("🏖️ دلیل مرخصی را بنویس:", reply_markup=kb_back())
+    return LEAVE_REASON
+
+async def leave_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    txt = update.message.text.strip()
+
+    if txt in ["⬅️ بازگشت", "⬅️ بازگشت به منوی اصلی"]:
+        await start(update, context)
+        return ConversationHandler.END
+
+    date_str = today_str()
+    full_name = get_employee_full_name(uid) or update.effective_user.full_name
+
+    conn = db()
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO leave_requests (date, user_id, full_name, reason, status, created_at)
+        VALUES (?, ?, ?, ?, 'pending', ?)
+    """, (date_str, uid, full_name, txt, datetime.now().isoformat(timespec="seconds")))
+    req_id = c.lastrowid
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text("✅ درخواست مرخصی ثبت شد و به مدیر ارسال شد.", reply_markup=kb_employee(uid))
+
+    msg = f"🏖️ درخواست مرخصی\n\n👤 {full_name}\n🗓️ {date_str}\n\n📌 دلیل:\n{txt}"
+
+    for mid in ADMIN_USERS:
+        try:
+            await context.bot.send_message(chat_id=mid, text=msg, reply_markup=ikb_leave(req_id))
+        except:
+            pass
+
+    return ConversationHandler.END
+
+async def leave_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.from_user.id not in ADMIN_USERS:
+        await q.edit_message_text("❌ فقط مدیر اجازه دارد.")
+        return
+
+    action, req_id_str = q.data.split(":")
+    req_id = int(req_id_str)
+
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT user_id, full_name, date FROM leave_requests WHERE id=?", (req_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        await q.edit_message_text("❌ درخواست پیدا نشد.")
+        return
+
+    emp_id, full_name, date_str = row
+
+    if action == "leave_approve":
+        c.execute("UPDATE leave_requests SET status='approved' WHERE id=?", (req_id,))
+        conn.commit()
+        conn.close()
+        await q.edit_message_text("✅ مرخصی تایید شد.")
+        try:
+            await context.bot.send_message(chat_id=emp_id, text=f"✅ مرخصی شما برای {date_str} تایید شد.")
+        except:
+            pass
+
+    elif action == "leave_reject":
+        c.execute("UPDATE leave_requests SET status='rejected' WHERE id=?", (req_id,))
+        conn.commit()
+        conn.close()
+        await q.edit_message_text("❌ مرخصی رد شد.")
+        try:
+            await context.bot.send_message(chat_id=emp_id, text=f"❌ مرخصی شما برای {date_str} رد شد.")
+        except:
+            pass
+
+# =============================================================================
+# Manager features
 # =============================================================================
 async def manager_pending_employees(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_USERS:
@@ -483,7 +784,7 @@ async def list_employees(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ هنوز کارمندی تایید نشده.", reply_markup=kb_manager(update.effective_user.id))
         return
 
-    text = f"🧾 لیست کارمندهای تایید شده | {COMPANY}\n\n"
+    text = "🧾 لیست کارمندهای تایید شده:\n\n"
     for uid, username, full_name in emps:
         text += f"• {full_name} | ID: {uid}"
         if username:
@@ -497,7 +798,7 @@ async def list_employees(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=kb_manager(update.effective_user.id))
 
 # =============================================================================
-# Shift assignment
+# Shift assignment persistent
 # =============================================================================
 async def assign_shift_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_USERS:
@@ -511,35 +812,36 @@ async def assign_shift_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = "🗓️ تعیین/تغییر شیفت کارمند\n\nیک کارمند را با ID ارسال کن:\n\n"
     for uid, username, full_name in emps:
         text += f"• {full_name} | ID: {uid}\n"
-    text += "\nمثلاً: 123456789"
+    text += "\n(مثلاً: 123456789)\n\n⬅️ بازگشت: /cancel"
 
-    await update.message.reply_text(text, reply_markup=kb_back())
+    await update.message.reply_text(text, reply_markup=kb_manager(update.effective_user.id))
     return ASSIGN_SHIFT_USER
 
 async def assign_shift_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
-
-    if txt in ["⬅️ بازگشت", "🏠 منوی اصلی"]:
-        await manager_panel(update, context)
-        return ConversationHandler.END
-
     if not txt.isdigit():
-        await update.message.reply_text("❌ لطفاً فقط ID عددی بفرست.", reply_markup=kb_back())
+        await update.message.reply_text("❌ لطفاً فقط ID عددی بفرست.", reply_markup=kb_manager(update.effective_user.id))
         return ASSIGN_SHIFT_USER
 
     context.user_data["assign_user_id"] = int(txt)
-    await update.message.reply_text("شماره شیفت را انتخاب کن (1/2/3):", reply_markup=kb_shift_select())
+
+    kb = ReplyKeyboardMarkup(
+        [[KeyboardButton("1"), KeyboardButton("2"), KeyboardButton("3")],
+         [KeyboardButton("⬅️ بازگشت به منوی اصلی")]],
+        resize_keyboard=True
+    )
+
+    await update.message.reply_text("شماره شیفت را انتخاب کن (1/2/3):", reply_markup=kb)
     return ASSIGN_SHIFT_SHIFT
 
 async def assign_shift_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
-
-    if txt in ["⬅️ بازگشت", "🏠 منوی اصلی"]:
-        await manager_panel(update, context)
+    if txt == "⬅️ بازگشت به منوی اصلی":
+        await start(update, context)
         return ConversationHandler.END
 
     if txt not in ["1", "2", "3"]:
-        await update.message.reply_text("❌ فقط 1 یا 2 یا 3 بفرست.", reply_markup=kb_shift_select())
+        await update.message.reply_text("❌ فقط 1 یا 2 یا 3 بفرست.", reply_markup=kb_manager(update.effective_user.id))
         return ASSIGN_SHIFT_SHIFT
 
     emp_id = context.user_data.get("assign_user_id")
@@ -548,314 +850,17 @@ async def assign_shift_shift(update: Update, context: ContextTypes.DEFAULT_TYPE)
     set_employee_shift(emp_id, shift_id)
     s = get_shift_by_id(shift_id)
 
-    await update.message.reply_text(f"✅ شیفت کارمند تنظیم شد: {s[1]} ({s[2]}-{s[3]})", reply_markup=kb_manager(update.effective_user.id))
+    await update.message.reply_text(
+        f"✅ شیفت کارمند تنظیم شد: {s[1]} ({s[2]}-{s[3]})",
+        reply_markup=kb_manager(update.effective_user.id)
+    )
 
     try:
-        await context.bot.send_message(chat_id=emp_id, text=f"📌 شیفت شما در {COMPANY} تغییر کرد:\n\n{s[1]} ({s[2]}-{s[3]}) ✅")
+        await context.bot.send_message(chat_id=emp_id, text=f"📌 شیفت شما تنظیم شد:\n\n{s[1]} ({s[2]}-{s[3]}) ✅")
     except:
         pass
 
     return ConversationHandler.END
-
-# =============================================================================
-# Employee: My shift
-# =============================================================================
-async def my_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_employee_access(update, context):
-        return
-
-    user = update.effective_user
-    shift_id = get_employee_shift(user.id)
-
-    if not shift_id:
-        await update.message.reply_text("❌ هنوز شیفت شما توسط مدیر تنظیم نشده.", reply_markup=kb_employee(user.id))
-        return
-
-    s = get_shift_by_id(shift_id)
-
-    yday = (datetime.now().date() - timedelta(days=1)).isoformat()
-    conn = db()
-    c = conn.cursor()
-    c.execute("SELECT full_name, note FROM shift_notes WHERE date=? ORDER BY id DESC LIMIT 1", (yday,))
-    prev_note = c.fetchone()
-    c.execute("SELECT note FROM manager_notes WHERE date=? ORDER BY id DESC LIMIT 1", (yday,))
-    mgr_note = c.fetchone()
-    conn.close()
-
-    text = (
-        f"🕒 شیفت شما | {COMPANY}\n\n"
-        f"✅ {s[1]}\n"
-        f"⏰ ساعت: {s[2]} تا {s[3]}\n\n"
-    )
-
-    text += "📜 توضیح شیفت قبلی:\n"
-    if prev_note:
-        text += f"👤 {prev_note[0]}\n{prev_note[1]}\n\n"
-    else:
-        text += "— موردی ثبت نشده.\n\n"
-
-    text += "📝 پیام مدیر:\n"
-    text += mgr_note[0] if mgr_note else "— پیامی ثبت نشده."
-
-    await update.message.reply_text(text, reply_markup=kb_employee(user.id))
-
-# =============================================================================
-# Attendance
-# =============================================================================
-def get_today_attendance(user_id: int, date_str: str):
-    conn = db()
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, shift_id, check_in_time, check_out_time, delay_minutes
-        FROM attendance
-        WHERE date=? AND user_id=?
-        ORDER BY id DESC LIMIT 1
-    """, (date_str, user_id))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-async def employee_check_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_employee_access(update, context):
-        return
-
-    user = update.effective_user
-    date_str = get_today_str()
-    shift_id = get_employee_shift(user.id)
-
-    if not shift_id:
-        await update.message.reply_text("❌ شیفت شما هنوز تنظیم نشده.", reply_markup=kb_employee(user.id))
-        return
-
-    existing = get_today_attendance(user.id, date_str)
-    if existing and existing[2]:
-        await update.message.reply_text("✅ ورود شما قبلاً ثبت شده است.", reply_markup=kb_employee(user.id))
-        return
-
-    shift = get_shift_by_id(shift_id)
-    now = datetime.now()
-    shift_start_dt = datetime.combine(now.date(), parse_hhmm(shift[2]))
-    delay = max(0, int((now - shift_start_dt).total_seconds() // 60))
-
-    conn = db()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO attendance (date, user_id, full_name, shift_id, check_in_time, delay_minutes)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (date_str, user.id, get_employee_full_name(user.id) or user.full_name, shift_id, now.isoformat(timespec="seconds"), delay))
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text(
-        f"✅ ورود ثبت شد | {COMPANY}\n\n"
-        f"👤 {get_employee_full_name(user.id) or user.full_name}\n"
-        f"🕒 {shift[1]} ({shift[2]}-{shift[3]})\n"
-        f"⏱️ تاخیر: {delay} دقیقه",
-        reply_markup=kb_employee(user.id)
-    )
-
-    await notify_real_managers(context,
-        f"📌 ثبت ورود | {COMPANY}\n\n"
-        f"👤 {get_employee_full_name(user.id) or user.full_name}\n"
-        f"🗓️ {date_str}\n"
-        f"🕒 {shift[1]}\n"
-        f"⏱️ تاخیر: {delay} دقیقه"
-    )
-
-async def employee_check_out(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_employee_access(update, context):
-        return
-
-    user = update.effective_user
-    date_str = get_today_str()
-    row = get_today_attendance(user.id, date_str)
-
-    if not row or not row[2]:
-        await update.message.reply_text("❌ هنوز ورود ثبت نکرده‌اید.", reply_markup=kb_employee(user.id))
-        return
-    if row[3]:
-        await update.message.reply_text("✅ خروج شما قبلاً ثبت شده است.", reply_markup=kb_employee(user.id))
-        return
-
-    now = datetime.now()
-    conn = db()
-    c = conn.cursor()
-    c.execute("UPDATE attendance SET check_out_time=? WHERE id=?", (now.isoformat(timespec="seconds"), row[0]))
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text("✅ خروج ثبت شد. خسته نباشی 🌟", reply_markup=kb_employee(user.id))
-    await notify_real_managers(context,
-        f"✅ ثبت خروج | {COMPANY}\n\n"
-        f"👤 {get_employee_full_name(user.id) or user.full_name}\n"
-        f"🗓️ {date_str}\n"
-        f"🕒 ساعت: {now.strftime('%H:%M')}"
-    )
-
-async def employee_status_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_employee_access(update, context):
-        return
-
-    user = update.effective_user
-    date_str = get_today_str()
-    shift_id = get_employee_shift(user.id)
-    att = get_today_attendance(user.id, date_str)
-
-    text = f"📍 وضعیت امروز ({date_str}) | {COMPANY}\n\n"
-    if shift_id:
-        s = get_shift_by_id(shift_id)
-        text += f"🕒 شیفت: {s[1]} ({s[2]}-{s[3]})\n\n"
-    else:
-        text += "🕒 شیفت: تعیین نشده\n\n"
-
-    if att:
-        text += f"✅ ورود: {att[2]}\n"
-        text += f"❌ خروج: {att[3] or 'ثبت نشده'}\n"
-        text += f"⏱️ تاخیر: {att[4]} دقیقه\n"
-    else:
-        text += "❌ ورود ثبت نشده.\n"
-
-    await update.message.reply_text(text, reply_markup=kb_employee(user.id))
-
-# =============================================================================
-# Notes
-# =============================================================================
-async def employee_note_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_employee_access(update, context):
-        return ConversationHandler.END
-
-    await update.message.reply_text("✍️ توضیح خود را برای شیفت بعد بنویس:", reply_markup=kb_back())
-    return EMP_NOTE
-
-async def employee_note_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    txt = update.message.text.strip()
-
-    if txt in ["⬅️ بازگشت", "🏠 منوی اصلی"]:
-        await employee_panel(update, context)
-        return ConversationHandler.END
-
-    date_str = get_today_str()
-    shift_id = get_employee_shift(user.id) or 0
-
-    conn = db()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO shift_notes (date, user_id, full_name, shift_id, note, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (date_str, user.id, get_employee_full_name(user.id) or user.full_name, shift_id, txt, datetime.now().isoformat(timespec="seconds")))
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text("✅ توضیح ثبت شد و به مدیر ارسال شد.", reply_markup=kb_employee(user.id))
-    await notify_real_managers(context, f"📝 توضیح شیفت بعد | {COMPANY}\n\n👤 {get_employee_full_name(user.id) or user.full_name}\n🗓️ {date_str}\n\n{txt}")
-    return ConversationHandler.END
-
-async def previous_shift_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_employee_access(update, context):
-        return
-
-    yday = (datetime.now().date() - timedelta(days=1)).isoformat()
-    conn = db()
-    c = conn.cursor()
-    c.execute("SELECT full_name, shift_id, note FROM shift_notes WHERE date=? ORDER BY id DESC LIMIT 1", (yday,))
-    row = c.fetchone()
-    c.execute("SELECT note FROM manager_notes WHERE date=? ORDER BY id DESC LIMIT 1", (yday,))
-    mgr = c.fetchone()
-    conn.close()
-
-    text = f"📜 توضیحات شیفت قبلی | {COMPANY}\n\n"
-    if row:
-        text += f"👤 {row[0]} | شیفت {row[1]}\n\n{row[2]}\n\n"
-    else:
-        text += "— موردی ثبت نشده.\n\n"
-
-    text += "📝 پیام مدیر:\n\n"
-    text += mgr[0] if mgr else "— پیامی ثبت نشده."
-
-    await update.message.reply_text(text, reply_markup=kb_employee(update.effective_user.id))
-
-# =============================================================================
-# Leave
-# =============================================================================
-async def leave_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_employee_access(update, context):
-        return ConversationHandler.END
-    await update.message.reply_text("🏖️ دلیل مرخصی را بنویس:", reply_markup=kb_back())
-    return LEAVE_REASON
-
-async def leave_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    reason = update.message.text.strip()
-
-    if reason in ["⬅️ بازگشت", "🏠 منوی اصلی"]:
-        await employee_panel(update, context)
-        return ConversationHandler.END
-
-    date_str = get_today_str()
-
-    conn = db()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO leave_requests (date, user_id, full_name, reason, status, created_at)
-        VALUES (?, ?, ?, ?, 'pending', ?)
-    """, (date_str, user.id, get_employee_full_name(user.id) or user.full_name, reason, datetime.now().isoformat(timespec="seconds")))
-    req_id = c.lastrowid
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text("✅ درخواست مرخصی ثبت شد و برای مدیر ارسال شد.", reply_markup=kb_employee(user.id))
-
-    msg = f"🏖️ درخواست مرخصی | {COMPANY}\n\n👤 {get_employee_full_name(user.id) or user.full_name}\n🗓️ {date_str}\n\n📌 دلیل:\n{reason}"
-    for mid in ADMIN_USERS:
-        try:
-            await context.bot.send_message(chat_id=mid, text=msg, reply_markup=ikb_leave_approve_reject(req_id))
-        except:
-            pass
-
-    return ConversationHandler.END
-
-async def leave_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id not in ADMIN_USERS:
-        await query.edit_message_text("❌ فقط مدیر اجازه دارد.")
-        return
-
-    action, req_id_str = query.data.split(":")
-    req_id = int(req_id_str)
-
-    conn = db()
-    c = conn.cursor()
-    c.execute("SELECT user_id, full_name, date FROM leave_requests WHERE id=?", (req_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close()
-        await query.edit_message_text("❌ درخواست پیدا نشد.")
-        return
-
-    emp_id, full_name, date_str = row
-
-    if action == "leave_approve":
-        c.execute("UPDATE leave_requests SET status='approved' WHERE id=?", (req_id,))
-        conn.commit()
-        conn.close()
-        await query.edit_message_text("✅ مرخصی تایید شد.")
-        try:
-            await context.bot.send_message(chat_id=emp_id, text=f"✅ مرخصی شما برای {date_str} تایید شد.")
-        except:
-            pass
-
-    elif action == "leave_reject":
-        c.execute("UPDATE leave_requests SET status='rejected' WHERE id=?", (req_id,))
-        conn.commit()
-        conn.close()
-        await query.edit_message_text("❌ مرخصی رد شد.")
-        try:
-            await context.bot.send_message(chat_id=emp_id, text=f"❌ مرخصی شما برای {date_str} رد شد.")
-        except:
-            pass
 
 # =============================================================================
 # Manager note + report
@@ -867,33 +872,36 @@ async def manager_note_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return MANAGER_NOTE
 
 async def manager_note_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    txt = update.message.text.strip()
 
-    if text in ["⬅️ بازگشت", "🏠 منوی اصلی"]:
-        await manager_panel(update, context)
+    if txt in ["⬅️ بازگشت", "⬅️ بازگشت به منوی اصلی"]:
+        await start(update, context)
         return ConversationHandler.END
 
-    date_str = get_today_str()
+    date_str = today_str()
+
     conn = db()
     c = conn.cursor()
     c.execute("""
         INSERT INTO manager_notes (date, note, created_at)
         VALUES (?, ?, ?)
-    """, (date_str, text, datetime.now().isoformat(timespec="seconds")))
+    """, (date_str, txt, datetime.now().isoformat(timespec="seconds")))
     conn.commit()
     conn.close()
 
     await update.message.reply_text("✅ پیام مدیر ثبت شد.", reply_markup=kb_manager(update.effective_user.id))
-    await notify_admins(context, f"📝 پیام مدیر ثبت شد | {COMPANY}:\n\n{text}")
+
     return ConversationHandler.END
 
 async def manager_report_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_USERS:
         return
 
-    date_str = get_today_str()
+    date_str = today_str()
+
     conn = db()
     c = conn.cursor()
+
     c.execute("""
         SELECT full_name, shift_id, check_in_time, check_out_time, delay_minutes
         FROM attendance
@@ -911,12 +919,12 @@ async def manager_report_today(update: Update, context: ContextTypes.DEFAULT_TYP
     leaves = c.fetchall()
     conn.close()
 
-    text = f"📊 گزارش امروز ({date_str}) | {COMPANY}\n\n"
+    text = f"📊 گزارش امروز ({date_str}) | {COMPANY_NAME}\n\n"
     if rows:
         text += "✅ حضور و غیاب:\n"
         for full_name, shift_id, cin, cout, delay in rows:
-            cin_t = cin.split("T")[-1] if cin else "—"
-            cout_t = cout.split("T")[-1] if cout else "—"
+            cin_t = cin.split('T')[-1] if cin else "—"
+            cout_t = cout.split('T')[-1] if cout else "—"
             text += f"• {full_name} | شیفت {shift_id} | ورود: {cin_t} | خروج: {cout_t} | تاخیر: {delay}m\n"
     else:
         text += "— هنوز ورود/خروج ثبت نشده.\n"
@@ -931,7 +939,7 @@ async def manager_report_today(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(text, reply_markup=kb_manager(update.effective_user.id))
 
 # =============================================================================
-# Jobs
+# Jobs: reminders + late alert + nightly report
 # =============================================================================
 async def job_shift_reminder(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
@@ -951,12 +959,12 @@ async def job_shift_reminder(context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.send_message(
                         chat_id=uid,
-                        text=(
-                            f"⏰ یادآوری شروع شیفت | {COMPANY}\n\n"
-                            f"سلام {name} 🌟\n"
-                            f"تا {REMINDER_MINUTES_BEFORE_SHIFT} دقیقه دیگر شیفت شما شروع می‌شود:\n"
-                            f"🕒 {shift_name} ({start_hhmm}-{end_hhmm})\n\n"
-                            "لطفاً در زمان شروع شیفت «✅ ثبت ورود» را انجام دهید."
+                        text=REMINDER_TEXT.format(
+                            name=name or "همکار عزیز",
+                            minutes=REMINDER_MINUTES_BEFORE_SHIFT,
+                            shift_name=shift_name,
+                            start=start_hhmm,
+                            end=end_hhmm,
                         )
                     )
                 except:
@@ -964,7 +972,7 @@ async def job_shift_reminder(context: ContextTypes.DEFAULT_TYPE):
 
 async def job_late_alert(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
-    date_str = get_today_str()
+    date_str = today_str()
 
     for shift_id, shift_name, start_hhmm, _ in SHIFTS:
         start_dt = datetime.combine(now.date(), parse_hhmm(start_hhmm))
@@ -973,23 +981,27 @@ async def job_late_alert(context: ContextTypes.DEFAULT_TYPE):
         if abs((now - alert_dt).total_seconds()) < 60:
             conn = db()
             c = conn.cursor()
+
             c.execute("SELECT user_id FROM employee_shifts WHERE shift_id=?", (shift_id,))
             assigned = [r[0] for r in c.fetchall()]
 
-            c.execute("SELECT user_id FROM attendance WHERE date=? AND shift_id=? AND check_in_time IS NOT NULL",
-                      (date_str, shift_id))
+            c.execute("SELECT user_id FROM attendance WHERE date=? AND shift_id=? AND check_in_time IS NOT NULL", (date_str, shift_id))
             checked = {r[0] for r in c.fetchall()}
             conn.close()
 
             late_people = [uid for uid in assigned if uid not in checked]
             if late_people:
-                names = [get_employee_full_name(uid) or str(uid) for uid in late_people]
+                names = []
+                for uid in late_people:
+                    names.append(get_employee_full_name(uid) or str(uid))
+
                 await notify_real_managers(
                     context,
-                    f"⚠️ هشدار عدم ثبت ورود | {COMPANY}\n\n"
-                    f"شیفت: {shift_name}\n"
-                    f"تا {LATE_ALERT_MINUTES_AFTER_SHIFT_START} دقیقه بعد از شروع شیفت، ورود ثبت نشده برای:\n"
-                    + "\n".join([f"• {n}" for n in names])
+                    LATE_ALERT_TEXT.format(
+                        shift_name=shift_name,
+                        late=LATE_ALERT_MINUTES_AFTER_SHIFT_START,
+                        list="\n".join([f"• {n}" for n in names])
+                    )
                 )
 
 async def job_nightly_report(context: ContextTypes.DEFAULT_TYPE):
@@ -997,7 +1009,7 @@ async def job_nightly_report(context: ContextTypes.DEFAULT_TYPE):
     if now.hour != NIGHTLY_REPORT_HOUR or now.minute != NIGHTLY_REPORT_MINUTE:
         return
 
-    date_str = get_today_str()
+    date_str = today_str()
     conn = db()
     c = conn.cursor()
     c.execute("""
@@ -1017,12 +1029,12 @@ async def job_nightly_report(context: ContextTypes.DEFAULT_TYPE):
     leaves = c.fetchall()
     conn.close()
 
-    text = f"📌 گزارش شبانه ({date_str}) | {COMPANY}\n\n"
+    text = f"📌 گزارش شبانه ({date_str}) | {COMPANY_NAME}\n\n"
     if rows:
         text += "✅ حضور و غیاب:\n"
         for full_name, shift_id, cin, cout, delay in rows:
-            cin_t = cin.split("T")[-1] if cin else "—"
-            cout_t = cout.split("T")[-1] if cout else "—"
+            cin_t = cin.split('T')[-1] if cin else "—"
+            cout_t = cout.split('T')[-1] if cout else "—"
             text += f"• {full_name} | شیفت {shift_id} | ورود: {cin_t} | خروج: {cout_t} | تاخیر: {delay}m\n"
     else:
         text += "— هیچ ورودی ثبت نشده.\n"
@@ -1037,73 +1049,116 @@ async def job_nightly_report(context: ContextTypes.DEFAULT_TYPE):
     await notify_real_managers(context, text)
 
 # =============================================================================
-# Webhook handler
-# =============================================================================
-bot_app = Application.builder().token(BOT_TOKEN).build()
-
-@app.post("/webhook")
-def telegram_webhook():
-    update = Update.de_json(request.get_json(force=True), bot_app.bot)
-    asyncio.run(bot_app.process_update(update))
-    return "OK", 200
-
-# =============================================================================
 # Router
 # =============================================================================
-async def handle_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if text == "⬅️ بازگشت":
-        # Back = go to panel based on last panel
-        if context.user_data.get("last_panel") == "manager":
-            return await manager_panel(update, context)
+    user_id = update.effective_user.id
+
+    if text == "👨‍💼 پنل مدیر":
+        return await manager_panel(update, context)
+
+    if text == "👤 پنل کارمند":
         return await employee_panel(update, context)
 
-    if text == "🏠 منوی اصلی":
-        return await start(update, context)
+    if text == "ℹ️ راهنما":
+        return await help_cmd(update, context)
 
-    return await handle_buttons(update, context)
+    # Employee buttons
+    if text == "📌 ثبت‌نام کارمند":
+        await register_employee_start(update, context)
+        return
+
+    if text == "🕒 شیفت من":
+        return await my_shift(update, context)
+
+    if text == "✅ ثبت ورود":
+        return await employee_check_in(update, context)
+
+    if text == "❌ ثبت خروج":
+        return await employee_check_out(update, context)
+
+    if text == "📍 وضعیت امروز":
+        return await employee_status_today(update, context)
+
+    if text == "✍️ توضیح برای شیفت بعد":
+        return await employee_note_start(update, context)
+
+    if text == "📜 توضیح شیفت قبلی":
+        return await previous_shift_notes(update, context)
+
+    if text == "🏖️ درخواست مرخصی":
+        return await leave_start(update, context)
+
+    # Manager buttons
+    if text == "👥 تایید کارمندها":
+        return await manager_pending_employees(update, context)
+
+    if text == "🧾 لیست کارمندها":
+        return await list_employees(update, context)
+
+    if text == "🗓️ تعیین/تغییر شیفت":
+        return await assign_shift_start(update, context)
+
+    if text == "📝 پیام مدیر":
+        return await manager_note_start(update, context)
+
+    if text == "📊 گزارش امروز":
+        return await manager_report_today(update, context)
+
+    if text == "🏖️ مرخصی‌ها":
+        await update.message.reply_text("✅ درخواست‌های مرخصی از طریق پیام‌های تایید/رد مدیریت می‌شوند.", reply_markup=kb_manager(user_id))
+        return
+
+    if text == "⬅️ بازگشت به منوی اصلی":
+        await update.message.reply_text("✅ منوی اصلی", reply_markup=kb_main(user_id))
+        return
+
+    await update.message.reply_text("❓ متوجه نشدم. از دکمه‌ها استفاده کن.", reply_markup=kb_main(user_id))
 
 # =============================================================================
-# Build telegram app
+# BOT MAIN
 # =============================================================================
-def setup_bot():
+async def bot_main():
     init_db()
 
+    application = Application.builder().token(BOT_TOKEN).build()
+
     # Commands
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
 
     # Callbacks
-    bot_app.add_handler(CallbackQueryHandler(approve_reject_callback, pattern=r"^(approve|reject):"))
-    bot_app.add_handler(CallbackQueryHandler(leave_callback, pattern=r"^(leave_approve|leave_reject):"))
+    application.add_handler(CallbackQueryHandler(approve_reject_callback, pattern=r"^(approve|reject):"))
+    application.add_handler(CallbackQueryHandler(leave_callback, pattern=r"^(leave_approve|leave_reject):"))
 
     # Conversations
-    bot_app.add_handler(ConversationHandler(
+    application.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^📌 ثبت‌نام کارمند$"), register_employee_start)],
         states={REG_FULLNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_employee_save)]},
         fallbacks=[],
     ))
 
-    bot_app.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^✍️ ثبت توضیح برای شیفت بعد$"), employee_note_start)],
+    application.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^✍️ توضیح برای شیفت بعد$"), employee_note_start)],
         states={EMP_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, employee_note_save)]},
         fallbacks=[],
     ))
 
-    bot_app.add_handler(ConversationHandler(
+    application.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^🏖️ درخواست مرخصی$"), leave_start)],
         states={LEAVE_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, leave_save)]},
         fallbacks=[],
     ))
 
-    bot_app.add_handler(ConversationHandler(
+    application.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^📝 پیام مدیر$"), manager_note_start)],
         states={MANAGER_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, manager_note_save)]},
         fallbacks=[],
     ))
 
-    bot_app.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🗓️ تعیین/تغییر شیفت کارمند$"), assign_shift_start)],
+    application.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^🗓️ تعیین/تغییر شیفت$"), assign_shift_start)],
         states={
             ASSIGN_SHIFT_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, assign_shift_user)],
             ASSIGN_SHIFT_SHIFT: [MessageHandler(filters.TEXT & ~filters.COMMAND, assign_shift_shift)],
@@ -1111,20 +1166,30 @@ def setup_bot():
         fallbacks=[],
     ))
 
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_router))
-
-# =============================================================================
-# Main
-# =============================================================================
-if __name__ == "__main__":
-    setup_bot()
+    # Router
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_buttons))
 
     # Jobs
-    bot_app.job_queue.run_repeating(job_shift_reminder, interval=60, first=10)
-    bot_app.job_queue.run_repeating(job_late_alert, interval=60, first=20)
-    bot_app.job_queue.run_repeating(job_nightly_report, interval=60, first=30)
+    application.job_queue.run_repeating(job_shift_reminder, interval=60, first=10)
+    application.job_queue.run_repeating(job_late_alert, interval=60, first=20)
+    application.job_queue.run_repeating(job_nightly_report, interval=60, first=30)
 
-    # Start webhook + flask
-    threading.Thread(target=lambda: bot_app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=f"{RENDER_URL}/webhook"), daemon=True).start()
-    print(f"✅ {COMPANY} Bot running on PORT={PORT}")
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    print("✅ Telegram bot polling started!")
+    await asyncio.Event().wait()
+
+def run_bot_thread():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(bot_main())
+
+if __name__ == "__main__":
+    # Start bot in thread
+    threading.Thread(target=run_bot_thread, daemon=True).start()
+
+    # Start Flask for Render keep-alive
+    print(f"✅ Flask running on PORT={PORT}")
     app.run(host="0.0.0.0", port=PORT)
